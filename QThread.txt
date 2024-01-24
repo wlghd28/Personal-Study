@@ -1,0 +1,93 @@
+운영 체제의 스레드는 매우 간단합니다. 
+함수를 작성하고 일부 데이터와 함께 묶어 새로 생성된 스레드에 푸시할 수도 있습니다. 
+필요한 경우 뮤텍스나 다른 방법을 사용하여 스레드와 안전하게 통신하세요. 
+Win32, POSIX 또는 기타 스레드이든 기본적으로 모두 동일하게 작동하며 매우 간단합니다. 
+나는 그들이 적어도 소켓보다 사용하고 다루기가 훨씬 쉽다고 감히 말하고 싶습니다.🙂
+
+Qt 프레임워크의 즐거움을 발견한 사람들은 Qt(QThread)의 스레드가 이와 같다고 가정할 수 있지만 그것은 틀리기도 하고 옳기도 합니다. 
+QThread에 대한 Trolltech/Nokia의 수년간 잘못된 문서로 인해 수많은 사람들이 QThreads를 복잡하고 매우 부적절한 방식으로 사용하게 되었기 때문에 잘못된 것입니다. 
+QThread [1]에 대한 잘못된 공식 Qt 문서와 사용되는 수많은 잘못된 방법을 무시하는 한 QThreads는 실제로 사용하기 매우 쉽기 때문입니다.
+
+QThread를 사용할 때 명심해야 할 주요 사항은 그것이 스레드가 아니라는 것입니다. 스레드 객체를 둘러싼 래퍼입니다. 
+이 래퍼는 Qt 프로젝트 내에서 스레드 개체를 쉽게 사용할 수 있는 신호, 슬롯 및 메서드를 제공합니다. 
+이는 문서에서 QThreads를 사용하는 권장 방법, 즉 QThreads를 하위 클래스로 분류하고 자체 run() 함수를 구현하는 방법이 매우 잘못된 이유를 즉시 보여줍니다. 
+QThread는 일반 스레드 인스턴스와 매우 유사하게 사용해야 합니다.  원하는 모든 기능이 포함된 객체(QObject) 클래스를 준비합니다. 
+그런 다음 새 QThread 인스턴스를 만들고 QObject 인스턴스의 moveToThread(QThread*)를 사용하여 QObject를 그 인스턴스에 푸시하고 QThread 인스턴스에서 start()를 호출합니다. 
+그게 다야. 적절한 신호/슬롯 연결을 설정하여 적절하게 종료되도록 하면 그게 전부입니다.
+
+기본 예를 보려면 Worker 클래스에 대한 다음 클래스 선언을 확인하세요.
+
+class Worker : public QObject {
+    Q_OBJECT
+ 
+public:
+    Worker();
+    ~Worker();
+ 
+public slots:
+    void process();
+ 
+signals:
+    void finished();
+    void error(QString err);
+ 
+private:
+    // add your variables here
+};
+
+인스턴스를 트리거하고 스레드가 시작되면 데이터 처리를 시작하는 데 사용할 공개 슬롯을 하나 이상 추가합니다. 
+이제 이 기본 클래스의 구현이 어떤 모습인지 살펴보겠습니다.
+
+// --- CONSTRUCTOR ---
+Worker::Worker() {
+    // you could copy data from constructor arguments to internal variables here.
+}
+ 
+// --- DECONSTRUCTOR ---
+Worker::~Worker() {
+    // free resources
+}
+ 
+// --- PROCESS ---
+// Start processing data.
+void Worker::process() {
+    // allocate resources using new here
+    qDebug("Hello World!");
+    emit finished();
+}
+
+이 Worker 클래스는 특별한 작업을 수행하지 않지만 그럼에도 불구하고 필요한 모든 요소를 ​​포함합니다. 
+주 함수(이 경우 process())가 호출되면 처리가 시작되고, 완료되면 포함된 QThread 인스턴스의 종료를 트리거하는 데 사용되는 done() 신호를 내보냅니다.
+
+그런데 여기서 주목해야 할 매우 중요한 점 중 하나는 QObject 클래스의 생성자에서 절대로 힙 객체(new 사용)를 할당해서는 안 된다는 것입니다. 
+이 할당은 새 QThread 인스턴스가 아닌 기본 스레드에서 수행되기 때문입니다. 
+새로 생성된 객체는 QThread 인스턴스가 아닌 메인 스레드가 소유합니다. 이렇게 하면 코드가 작동하지 않게 됩니다. 
+대신에 이러한 리소스를 process()와 같은 기본 함수 슬롯에 할당하십시오. 
+이 경우 개체가 호출되면 개체가 새 스레드 인스턴스에 있게 되어 리소스를 소유하게 됩니다.
+
+이제 새 Worker 인스턴스를 생성하고 이를 QThread 인스턴스에 배치하여 이 새로운 구성을 사용하는 방법을 살펴보겠습니다.
+
+QThread* thread = new QThread;
+Worker* worker = new Worker();
+worker->moveToThread(thread);
+connect(worker, SIGNAL(error(QString)), this, SLOT(errorString(QString)));
+connect(thread, SIGNAL(started()), worker, SLOT(process()));
+connect(worker, SIGNAL(finished()), thread, SLOT(quit()));
+connect(worker, SIGNAL(finished()), worker, SLOT(deleteLater()));
+connect(thread, SIGNAL(finished()), thread, SLOT(deleteLater()));
+thread->start();
+
+여기서 connect() 시리즈가 가장 중요한 부분입니다. 
+첫 번째 connect() 줄은 작업자의 오류 메시지 신호를 기본 스레드의 오류 처리 함수에 연결합니다. 
+두 번째는 스레드의 selected() 신호를 작업자의processing() 슬롯에 연결하여 스레드가 시작되도록 합니다.
+
+그런 다음 
+정리: 작업자 인스턴스가 예제에서 했던 것처럼 done()을 내보내면 스레드에 종료하라는 신호를 보냅니다. 즉 종료됩니다. 
+그런 다음 동일한 done() 신호를 사용하여 작업자 인스턴스를 삭제 표시합니다. 
+마지막으로 스레드가 삭제될 때 아직 완전히 종료되지 않았기 때문에 발생하는 불쾌한 충돌을 방지하기 위해 스레드(작업자가 아님!)의 done()을 자체 deleteLater() 슬롯에 연결합니다. 
+이렇게 하면 스레드가 완전히 종료된 후에만 스레드가 삭제됩니다.
+
+이 작은 튜토리얼이 다른 사람들에게 조금이나마 도움이 되기를 바랍니다. 
+수많은 실망스러운 디버깅 시간과 '하위 클래스 QThread'의 동일한 잘못된 진언을 계속 반복하는 Google 검색과 관련된 작업을 수행하는 데 몇 달이 걸렸습니다. 
+이 튜토리얼에 대한 건설적인 피드백을 주시면 감사하겠습니다. 
+QThreads를 둘러싼 신화가 마침내 이 세상에서 지워지기를 바라기 때문에 잘못된 QThreads 문서를 Nokia에 이메일로 보내는 것도 좋은 생각일 수 있습니다.🙂
